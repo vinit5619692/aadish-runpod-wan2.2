@@ -1,0 +1,9 @@
+runpod
+torch
+diffusers>=0.37.0
+transformers
+accelerate
+safetensors
+sentencepiece
+imageio[ffmpeg]
+hf_transfer
