@@ -5,6 +5,7 @@ import tempfile
 import threading
 from pathlib import Path
 
+import requests
 import torch
 import runpod
 from diffusers import AutoencoderKLWan, WanAnimatePipeline
@@ -36,6 +37,23 @@ def _b64_to_file(b64_data: str, suffix: str) -> str:
     return f.name
 
 
+def _url_to_file(url: str, suffix: str) -> str:
+    r = requests.get(url, timeout=120)
+    r.raise_for_status()
+    f = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    f.write(r.content)
+    f.close()
+    return f.name
+
+
+def _input_to_file(b64_value: str, url_value: str, suffix: str, label: str) -> str:
+    if b64_value:
+        return _b64_to_file(b64_value, suffix)
+    if url_value:
+        return _url_to_file(url_value, suffix)
+    raise ValueError(f"Missing required input for {label}: provide base64 or URL")
+
+
 def get_pipe():
     global PIPE
     if PIPE is None:
@@ -46,12 +64,14 @@ def get_pipe():
                     raise RuntimeError("HF_TOKEN missing in endpoint env vars")
 
                 dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
                 vae = AutoencoderKLWan.from_pretrained(
                     MODEL_ID,
                     subfolder="vae",
                     torch_dtype=torch.float32,
                     token=hf_token,
                 )
+
                 PIPE = WanAnimatePipeline.from_pretrained(
                     MODEL_ID,
                     vae=vae,
@@ -70,14 +90,22 @@ def handler(job):
     data = job.get("input", {})
 
     prompt = data.get("prompt", "People in the video are doing actions.")
+    mode = data.get("mode", "animate")  # animate | replacement
+
     image_b64 = data.get("image_base64")
     pose_b64 = data.get("pose_video_base64")
     face_b64 = data.get("face_video_base64")
-    mode = data.get("mode", "animate")  # animate | replacement
 
-    if not image_b64 or not pose_b64 or not face_b64:
+    image_url = data.get("image_url")
+    pose_url = data.get("pose_video_url")
+    face_url = data.get("face_video_url")
+
+    if not ((image_b64 or image_url) and (pose_b64 or pose_url) and (face_b64 or face_url)):
         return {
-            "error": "Wan2.2 Animate requires image_base64 + pose_video_base64 + face_video_base64"
+            "error": (
+                "Wan2.2 Animate requires image + pose_video + face_video. "
+                "Provide either *_base64 or *_url for each."
+            )
         }
 
     seed = int(data.get("seed", 42))
@@ -89,16 +117,17 @@ def handler(job):
 
     image_path = pose_path = face_path = bg_path = mask_path = out_path = None
     try:
-        image_path = _b64_to_file(image_b64, ".png")
-        pose_path = _b64_to_file(pose_b64, ".mp4")
-        face_path = _b64_to_file(face_b64, ".mp4")
+        image_path = _input_to_file(image_b64, image_url, ".png", "image")
+        pose_path = _input_to_file(pose_b64, pose_url, ".mp4", "pose_video")
+        face_path = _input_to_file(face_b64, face_url, ".mp4", "face_video")
 
         image = load_image(image_path)
         pose_video = load_video(pose_path)
         face_video = load_video(face_path)
 
         pipe = get_pipe()
-        generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        generator = torch.Generator(device=device).manual_seed(seed)
 
         kwargs = dict(
             image=image,
@@ -116,10 +145,19 @@ def handler(job):
         if mode == "replacement":
             bg_b64 = data.get("background_video_base64")
             mask_b64 = data.get("mask_video_base64")
-            if not bg_b64 or not mask_b64:
-                return {"error": "replacement mode requires background_video_base64 and mask_video_base64"}
-            bg_path = _b64_to_file(bg_b64, ".mp4")
-            mask_path = _b64_to_file(mask_b64, ".mp4")
+            bg_url = data.get("background_video_url")
+            mask_url = data.get("mask_video_url")
+
+            if not ((bg_b64 or bg_url) and (mask_b64 or mask_url)):
+                return {
+                    "error": (
+                        "replacement mode requires background_video and mask_video "
+                        "as base64 or URL."
+                    )
+                }
+
+            bg_path = _input_to_file(bg_b64, bg_url, ".mp4", "background_video")
+            mask_path = _input_to_file(mask_b64, mask_url, ".mp4", "mask_video")
             kwargs["background_video"] = load_video(bg_path)
             kwargs["mask_video"] = load_video(mask_path)
 
@@ -133,7 +171,15 @@ def handler(job):
         with open(out_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        return {"video_base64": video_b64, "fps": fps, "seed": seed}
+        return {
+            "video_base64": video_b64,
+            "fps": fps,
+            "seed": seed,
+            "model": MODEL_ID,
+        }
+
+    except Exception as exc:
+        return {"error": str(exc)}
 
     finally:
         for p in [image_path, pose_path, face_path, bg_path, mask_path, out_path]:
