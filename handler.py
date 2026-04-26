@@ -11,6 +11,8 @@ import runpod
 from diffusers import AutoencoderKLWan, WanAnimatePipeline
 from diffusers.utils import load_image, load_video, export_to_video
 
+print("HANDLER_VERSION=2026-04-26-no-ftfy-v1")
+
 MODEL_ID = os.getenv("WAN_MODEL_ID", "Wan-AI/Wan2.2-Animate-14B-Diffusers")
 PIPE = None
 LOCK = threading.Lock()
