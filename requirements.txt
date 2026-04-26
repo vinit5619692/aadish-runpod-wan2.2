@@ -7,3 +7,4 @@ safetensors
 sentencepiece
 imageio[ffmpeg]
 hf_transfer
+ftfy
